@@ -1,0 +1,167 @@
+//@version=5
+strategy("Swing Safe Strategy - 10L Capital, Risk Managed", overlay=true, pyramiding=0, initial_capital=1000000, calc_on_order_fills=true, process_orders_on_close=true, max_labels_count=500)
+
+// ------------------------------------------------------------
+// Inputs
+// ------------------------------------------------------------
+startingCapital = input.float(1000000, "Starting Capital (₹)", minval=1000, step=1000)
+riskPct = input.float(0.75, "Risk per trade (%)", minval=0.10, maxval=5.0, step=0.05) / 100.0
+riskReward = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.1)
+atrLen = input.int(14, "ATR Length")
+atrStopMult = input.float(1.8, "ATR Stop Multiplier")
+fastEmaLen = input.int(20, "Fast EMA")
+slowEmaLen = input.int(50, "Slow EMA")
+rsiLen = input.int(14, "RSI Length")
+rsiLongMin = input.int(55, "RSI Buy Zone Min")
+rsiLongMax = input.int(70, "RSI Buy Zone Max")
+breakoutLookback = input.int(20, "Breakout Lookback")
+showLabels = input.bool(true, "Show Buy / TP / SL Labels")
+
+// ------------------------------------------------------------
+// Core trend / momentum logic
+// ------------------------------------------------------------
+fastEma = ta.ema(close, fastEmaLen)
+slowEma = ta.ema(close, slowEmaLen)
+atrVal = ta.atr(atrLen)
+rsiVal = ta.rsi(close, rsiLen)
+longTrend = fastEma > slowEma
+breakoutLevel = ta.highest(high, breakoutLookback)
+trendBreakout = close > breakoutLevel[1]
+longBias = longTrend and rsiVal >= rsiLongMin and rsiVal <= rsiLongMax and trendBreakout
+
+// ------------------------------------------------------------
+// Risk-based position sizing (fixed fractional)
+// ------------------------------------------------------------
+stopDistance = atrVal * atrStopMult
+stopDistance = math.max(stopDistance, syminfo.mintick)
+entryRisk = strategy.equity * riskPct
+positionSize = math.max(1, math.round(entryRisk / stopDistance))
+
+// ------------------------------------------------------------
+// Entry / exit levels
+// ------------------------------------------------------------
+longEntry = longBias
+stopPrice = close - stopDistance
+takeProfit = close + (close - stopPrice) * riskReward
+
+// ------------------------------------------------------------
+// Trade execution
+// ------------------------------------------------------------
+if longEntry
+    strategy.entry("Buy", strategy.long, qty=positionSize, comment="BUY")
+    strategy.exit("TP/SL", from_entry="Buy", limit=takeProfit, stop=stopPrice, comment_profit="TP", comment_loss="SL")
+
+// ------------------------------------------------------------
+// Visual labels
+// ------------------------------------------------------------
+if showLabels and strategy.position_size[1] == 0 and strategy.position_size > 0
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+    label.new(bar_index, takeProfit, "TP", style=label.style_label_left, color=color.blue, textcolor=color.white, size=size.tiny)
+    label.new(bar_index, stopPrice, "SL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+
+// ------------------------------------------------------------
+// Plotting trend structure
+// ------------------------------------------------------------
+plot(fastEma, color=color.new(color.teal, 0), linewidth=2, title="Fast EMA")
+plot(slowEma, color=color.new(color.orange, 0), linewidth=2, title="Slow EMA")
+plot(strategy.position_size > 0 ? close : na, color=color.new(color.lime, 0), linewidth=1, title="Long Active")
+
+// ------------------------------------------------------------
+// Monthly return / CAGR / win-rate tracking
+// ------------------------------------------------------------
+var float monthStartEquity = na
+var int monthTradeCount = 0
+var int monthWinCount = 0
+var int currentMonthKey = na
+var string[] monthLabels = array.new_string()
+var float[] monthReturns = array.new_float()
+var float[] monthCagr = array.new_float()
+var float[] monthWinRate = array.new_float()
+
+monthKey = year * 100 + month
+
+if na(currentMonthKey) or monthKey != currentMonthKey
+    if not na(currentMonthKey)
+        retPct = strategy.equity / monthStartEquity - 1.0
+        winPct = monthTradeCount > 0 ? (monthWinCount / monthTradeCount) * 100.0 : 0.0
+        cagrPct = (math.pow(1.0 + retPct, 12.0) - 1.0) * 100.0
+        array.push(monthLabels, str.tostring(year[1]) + "-" + str.tostring(month[1]))
+        array.push(monthReturns, retPct * 100.0)
+        array.push(monthCagr, cagrPct)
+        array.push(monthWinRate, winPct)
+    monthStartEquity := strategy.equity
+    monthTradeCount := 0
+    monthWinCount := 0
+    currentMonthKey := monthKey
+
+// Detect trade closure and update monthly stats
+tradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if tradeClosed
+    closedTradeProfit = strategy.netprofit - strategy.netprofit[1]
+    monthTradeCount += 1
+    if closedTradeProfit > 0
+        monthWinCount += 1
+
+if barstate.islast
+    retPct = strategy.equity / monthStartEquity - 1.0
+    winPct = monthTradeCount > 0 ? (monthWinCount / monthTradeCount) * 100.0 : 0.0
+    cagrPct = (math.pow(1.0 + retPct, 12.0) - 1.0) * 100.0
+    array.push(monthLabels, str.tostring(year) + "-" + str.tostring(month))
+    array.push(monthReturns, retPct * 100.0)
+    array.push(monthCagr, cagrPct)
+    array.push(monthWinRate, winPct)
+
+// ------------------------------------------------------------
+// Table: recent monthly results
+// ------------------------------------------------------------
+var table monthTable = table.new(position.top_right, 5, 12, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(monthTable, 0, 0, "Month", text_color=color.white, text_size=size.small)
+    table.cell(monthTable, 1, 0, "Return", text_color=color.white, text_size=size.small)
+    table.cell(monthTable, 2, 0, "CAGR", text_color=color.white, text_size=size.small)
+    table.cell(monthTable, 3, 0, "Win %", text_color=color.white, text_size=size.small)
+    table.cell(monthTable, 4, 0, "Capital", text_color=color.white, text_size=size.small)
+
+    maxRows = math.min(10, array.size(monthLabels))
+    rowIndex = 1
+    for i = 0 to maxRows - 1
+        idx = array.size(monthLabels) - 1 - i
+        if idx >= 0
+            labelText = array.get(monthLabels, idx)
+            retVal = array.get(monthReturns, idx)
+            cagrVal = array.get(monthCagr, idx)
+            winVal = array.get(monthWinRate, idx)
+            capVal = strategy.equity
+            if idx == array.size(monthLabels) - 1
+                capVal = strategy.equity
+            else
+                capVal = strategy.equity
+
+            table.cell(monthTable, 0, rowIndex, labelText, text_color=color.white, text_size=size.small)
+            table.cell(monthTable, 1, rowIndex, str.tostring(retVal, "#.##") + "%", text_color=(retVal >= 0 ? color.lime : color.red), text_size=size.small)
+            table.cell(monthTable, 2, rowIndex, str.tostring(cagrVal, "#.##") + "%", text_color=(cagrVal >= 0 ? color.teal : color.red), text_size=size.small)
+            table.cell(monthTable, 3, rowIndex, str.tostring(winVal, "#.##") + "%", text_color=color.white, text_size=size.small)
+            table.cell(monthTable, 4, rowIndex, str.tostring(capVal, "#,###") + " ₹", text_color=color.white, text_size=size.small)
+            rowIndex += 1
+
+// ------------------------------------------------------------
+// Strategy performance notes
+// ------------------------------------------------------------
+plot(strategy.equity, title="Equity Curve", color=color.new(color.white, 0), linewidth=2)
+
+// ------------------------------------------------------------
+// Summary text (safe risk model)
+// ------------------------------------------------------------
+if barstate.islast
+    table.cell(monthTable, 0, 11, "10L Capital", text_color=color.new(color.yellow, 0), text_size=size.small)
+    table.cell(monthTable, 1, 11, "Risk: " + str.tostring(riskPct * 100.0, "#.##") + "%", text_color=color.new(color.yellow, 0), text_size=size.small)
+    table.cell(monthTable, 2, 11, "RR: " + str.tostring(riskReward, "#.##") + ":1", text_color=color.new(color.yellow, 0), text_size=size.small)
+    table.cell(monthTable, 3, 11, "Equity: " + str.tostring(strategy.equity, "#,###") + " ₹", text_color=color.new(color.yellow, 0), text_size=size.small)
+
+// ------------------------------------------------------------
+// Alerts
+// ------------------------------------------------------------
+alertcondition(longEntry, title="Long Entry", message="Swing BUY setup")
+alertcondition(strategy.position_size > 0 and strategy.position_size[1] == 0, title="Position Opened", message="Position opened")
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] > 0, title="Position Closed", message="Position closed")
